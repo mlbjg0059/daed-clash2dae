@@ -1,0 +1,214 @@
+name: Build clash2dae IPK (OpenWrt x86_64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+      go_version:
+        description: 'Go version'
+        required: true
+        default: '1.22'
+
+  push:
+    tags:
+      - 'v*'
+
+  pull_request:
+    paths:
+      - 'services/clash2dae/**'
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  SERVICE_DIR: services/clash2dae
+  OUTPUT_DIR: dist/openwrt
+
+jobs:
+  build:
+    name: Build IPK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ github.event.inputs.go_version || '1.22' }}
+          cache: true
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build builder image
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          docker build --target builder -t clash2dae-builder:latest .
+
+      - name: Extract binary
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          mkdir -p ${{ env.OUTPUT_DIR }}
+          CID=$(docker create clash2dae-builder:latest)
+          docker cp ${CID}:/app/clash2dae ${{ env.OUTPUT_DIR }}/clash2dae
+          docker rm ${CID}
+          chmod +x ${{ env.OUTPUT_DIR }}/clash2dae
+          file ${{ env.OUTPUT_DIR }}/clash2dae
+          ls -lh ${{ env.OUTPUT_DIR }}/clash2dae
+
+      - name: Package IPK
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          VERSION: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          ./build-docker.sh
+
+      - name: Verify IPK
+        working-directory: ${{ env.SERVICE_DIR }}
+        run: |
+          ls -lh ${{ env.OUTPUT_DIR }}/*.ipk
+          tar -tzf ${{ env.OUTPUT_DIR }}/*.ipk
+
+      - name: Upload IPK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clash2dae-ipk-${{ github.event.inputs.version || github.ref_name }}
+          path: ${{ env.SERVICE_DIR }}/${{ env.OUTPUT_DIR }}/*.ipk
+          retention-days: 30
+
+      - name: Create Release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.SERVICE_DIR }}/${{ env.OUTPUT_DIR }}/*.ipk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-native:
+    name: Native Go Build (no Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: false  # Set to true if you want native build as alternative
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ github.event.inputs.go_version || '1.22' }}
+          cache: true
+          cache-dependency-path: ${{ env.SERVICE_DIR }}/go.sum
+
+      - name: Build binary (native cross-compile)
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p ${{ env.OUTPUT_DIR }}
+          go build -ldflags="-s -w" -o ${{ env.OUTPUT_DIR }}/clash2dae ./cmd/clash2dae
+          file ${{ env.OUTPUT_DIR }}/clash2dae
+          ls -lh ${{ env.OUTPUT_DIR }}/clash2dae
+
+      - name: Package IPK (manual)
+        working-directory: ${{ env.SERVICE_DIR }}
+        env:
+          VERSION: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          # Manual IPK packaging without Docker
+          mkdir -p ${{ env.OUTPUT_DIR }}/ipk-staging/{control,data/usr/bin,data/etc/init.d,data/etc/config}
+          cp ${{ env.OUTPUT_DIR }}/clash2dae ${{ env.OUTPUT_DIR }}/ipk-staging/data/usr/bin/
+          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/data/usr/bin/clash2dae
+
+          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/init.d/clash2dae << 'EOF'
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+USE_PROCD=1
+PROG=/usr/bin/clash2dae
+start_service() {
+    procd_open_instance
+    procd_set_param command "$PROG"
+    procd_set_param env PORT=8081 DAE_ENDPOINT=http://127.0.0.1:2023/graphql CACHE_DIR=/tmp/clash2dae
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+EOF
+          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/init.d/clash2dae
+
+          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/config/clash2dae << 'EOF'
+config clash2dae 'main'
+    option enabled '1'
+    option port '8081'
+    option dae_endpoint 'http://127.0.0.1:2023/graphql'
+    option dae_token ''
+    option cache_dir '/tmp/clash2dae'
+    option geoip_url 'https://github.com/v2fly/geoip/raw/release/geoip.dat'
+    option geosite_url 'https://github.com/v2fly/domain-list-community/raw/release/dlc.dat'
+    option schedule_enabled '1'
+EOF
+
+          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/control/control << EOF
+Package: clash2dae
+Version: ${VERSION}
+Architecture: x86_64
+Maintainer: DAE Team
+Depends: libc, libpthread, librt, ca-bundle
+Section: net
+Priority: optional
+Description: Clash to DAE converter service
+EOF
+
+          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/control/postinst << 'EOF'
+#!/bin/sh
+if [ -x /etc/init.d/clash2dae ] && [ -f /etc/config/clash2dae ]; then
+    /etc/init.d/clash2dae enable
+    /etc/init.d/clash2dae restart
+fi
+exit 0
+EOF
+          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/control/postinst
+
+          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/control/prerm << 'EOF'
+#!/bin/sh
+/etc/init.d/clash2dae stop
+/etc/init.d/clash2dae disable
+exit 0
+EOF
+          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/control/prerm
+
+          cd ${{ env.OUTPUT_DIR }}/ipk-staging
+          tar -czf ../control.tar.gz -C control .
+          tar -czf ../data.tar.gz -C data .
+          cd ..
+          mkdir -p pkg-staging
+          echo "2.0" > pkg-staging/debian-binary
+          cp control.tar.gz pkg-staging/
+          cp data.tar.gz pkg-staging/
+          tar -czf "clash2dae_${VERSION}_x86_64.ipk" -C pkg-staging debian-binary control.tar.gz data.tar.gz
+          cp "clash2dae_${VERSION}_x86_64.ipk" ../
+
+      - name: Upload Native IPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: clash2dae-ipk-native-${{ github.event.inputs.version || github.ref_name }}
+          path: ${{ env.SERVICE_DIR }}/${{ env.OUTPUT_DIR }}/*.ipk
+          retention-days: 30
