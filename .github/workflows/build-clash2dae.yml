@@ -132,77 +132,88 @@ jobs:
           VERSION: ${{ github.event.inputs.version || github.ref_name }}
         run: |
           # Manual IPK packaging without Docker
-          mkdir -p ${{ env.OUTPUT_DIR }}/ipk-staging/{control,data/usr/bin,data/etc/init.d,data/etc/config}
-          cp ${{ env.OUTPUT_DIR }}/clash2dae ${{ env.OUTPUT_DIR }}/ipk-staging/data/usr/bin/
-          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/data/usr/bin/clash2dae
+          set -euo pipefail
+          mkdir -p "${{ env.OUTPUT_DIR }}/ipk-staging/control"
+          mkdir -p "${{ env.OUTPUT_DIR }}/ipk-staging/data/usr/bin"
+          mkdir -p "${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/init.d"
+          mkdir -p "${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/config"
 
-          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/init.d/clash2dae <<- 'EOF'
-	#!/bin/sh /etc/rc.common
+          cp "${{ env.OUTPUT_DIR }}/clash2dae" "${{ env.OUTPUT_DIR }}/ipk-staging/data/usr/bin/"
+          chmod 755 "${{ env.OUTPUT_DIR }}/ipk-staging/data/usr/bin/clash2dae"
 
-	START=95
-	STOP=10
+          # Write init.d script using cat with quoted delimiter
+          cat > "${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/init.d/clash2dae" <<'SCRIPT_EOF'
+#!/bin/sh /etc/rc.common
 
-	USE_PROCD=1
+START=95
+STOP=10
 
-	PROG=/usr/bin/clash2dae
+USE_PROCD=1
 
-	start_service() {
-	    procd_open_instance
-	    procd_set_param command "$PROG"
-	    procd_set_param env PORT=8081 DAE_ENDPOINT=http://127.0.0.1:2023/graphql CACHE_DIR=/tmp/clash2dae
-	    procd_set_param respawn
-	    procd_set_param stdout 1
-	    procd_set_param stderr 1
-	    procd_close_instance
-	}
-	EOF
-          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/init.d/clash2dae
+PROG=/usr/bin/clash2dae
 
-          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/config/clash2dae <<- 'EOF'
-	config clash2dae 'main'
-	    option enabled '1'
-	    option port '8081'
-	    option dae_endpoint 'http://127.0.0.1:2023/graphql'
-	    option dae_token ''
-	    option cache_dir '/tmp/clash2dae'
-	    option geoip_url 'https://github.com/v2fly/geoip/raw/release/geoip.dat'
-	    option geosite_url 'https://github.com/v2fly/domain-list-community/raw/release/dlc.dat'
-	    option schedule_enabled '1'
-	EOF
+start_service() {
+    procd_open_instance
+    procd_set_param command "$PROG"
+    procd_set_param env PORT=8081 DAE_ENDPOINT=http://127.0.0.1:2023/graphql CACHE_DIR=/tmp/clash2dae
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+SCRIPT_EOF
+          chmod 755 "${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/init.d/clash2dae"
 
-          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/control/control <<- EOF
-	Package: clash2dae
-	Version: ${VERSION}
-	Architecture: x86_64
-	Maintainer: DAE Team
-	Depends: libc, libpthread, librt, ca-bundle
-	Section: net
-	Priority: optional
-	Description: Clash to DAE converter service
-	  Converts Clash YAML configurations to DAE GraphQL API calls.
-	  Supports proxy nodes, proxy groups, routing rules, rule providers,
-	  GEOIP/GEOSITE, DNS settings, and automatic updates.
-	EOF
+          # Write config file
+          cat > "${{ env.OUTPUT_DIR }}/ipk-staging/data/etc/config/clash2dae" <<'CONFIG_EOF'
+config clash2dae 'main'
+    option enabled '1'
+    option port '8081'
+    option dae_endpoint 'http://127.0.0.1:2023/graphql'
+    option dae_token ''
+    option cache_dir '/tmp/clash2dae'
+    option geoip_url 'https://github.com/v2fly/geoip/raw/release/geoip.dat'
+    option geosite_url 'https://github.com/v2fly/domain-list-community/raw/release/dlc.dat'
+    option schedule_enabled '1'
+CONFIG_EOF
 
-          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/control/postinst <<- 'EOF'
-	#!/bin/sh
-	if [ -x /etc/init.d/clash2dae ] && [ -f /etc/config/clash2dae ]; then
-	    /etc/init.d/clash2dae enable
-	    /etc/init.d/clash2dae restart
-	fi
-	exit 0
-	EOF
-          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/control/postinst
+          # Write control file
+          cat > "${{ env.OUTPUT_DIR }}/ipk-staging/control/control" <<CONTROL_EOF
+Package: clash2dae
+Version: ${VERSION}
+Architecture: x86_64
+Maintainer: DAE Team
+Depends: libc, libpthread, librt, ca-bundle
+Section: net
+Priority: optional
+Description: Clash to DAE converter service
+  Converts Clash YAML configurations to DAE GraphQL API calls.
+  Supports proxy nodes, proxy groups, routing rules, rule providers,
+  GEOIP/GEOSITE, DNS settings, and automatic updates.
+CONTROL_EOF
 
-          cat > ${{ env.OUTPUT_DIR }}/ipk-staging/control/prerm <<- 'EOF'
-	#!/bin/sh
-	/etc/init.d/clash2dae stop
-	/etc/init.d/clash2dae disable
-	exit 0
-	EOF
-          chmod 755 ${{ env.OUTPUT_DIR }}/ipk-staging/control/prerm
+          # Write postinst
+          cat > "${{ env.OUTPUT_DIR }}/ipk-staging/control/postinst" <<'POSTINST_EOF'
+#!/bin/sh
+if [ -x /etc/init.d/clash2dae ] && [ -f /etc/config/clash2dae ]; then
+    /etc/init.d/clash2dae enable
+    /etc/init.d/clash2dae restart
+fi
+exit 0
+POSTINST_EOF
+          chmod 755 "${{ env.OUTPUT_DIR }}/ipk-staging/control/postinst"
 
-          cd ${{ env.OUTPUT_DIR }}/ipk-staging
+          # Write prerm
+          cat > "${{ env.OUTPUT_DIR }}/ipk-staging/control/prerm" <<'PRERM_EOF'
+#!/bin/sh
+/etc/init.d/clash2dae stop
+/etc/init.d/clash2dae disable
+exit 0
+PRERM_EOF
+          chmod 755 "${{ env.OUTPUT_DIR }}/ipk-staging/control/prerm"
+
+          # Build IPK
+          cd "${{ env.OUTPUT_DIR }}/ipk-staging"
           tar -czf ../control.tar.gz -C control .
           tar -czf ../data.tar.gz -C data .
           cd ..
